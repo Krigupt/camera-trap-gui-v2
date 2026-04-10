@@ -15,29 +15,64 @@ export function MasterSheetForm() {
 
     setPending(true);
     try {
-      const res = await fetch("/api/admin/master-sheet", {
-        method: "POST",
-        body: fd,
-        credentials: "include",
-      });
+      const file1 = fd.get("file1");
+      const file2 = fd.get("file2");
+      const file3 = fd.get("file3");
+      const jsonFile = fd.get("jsonFile");
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(
-          typeof data.error === "string" ? data.error : "Request failed."
-        );
+      if (!(file1 instanceof File) || !file1.size) {
+        setError("File #1 (.xlsx) is required.");
+        return;
+      }
+      if (!(file2 instanceof File) || !file2.size) {
+        setError("File #2 (.xlsx) is required.");
+        return;
+      }
+      if (!(file3 instanceof File) || !file3.size) {
+        setError("File #3 (.csv) is required.");
+        return;
+      }
+      if (!(jsonFile instanceof File) || !jsonFile.size) {
+        setError("Predictions JSON is required.");
         return;
       }
 
-      const blob = await res.blob();
+      const metaEntries = fd.getAll("metadataCsvs");
+      const metadataBuffers: ArrayBuffer[] = [];
+      for (const entry of metaEntries) {
+        if (entry instanceof File && entry.size > 0) {
+          metadataBuffers.push(await entry.arrayBuffer());
+        }
+      }
+
+      const [buf1, buf2, buf3, jsonBuf] = await Promise.all([
+        file1.arrayBuffer(),
+        file2.arrayBuffer(),
+        file3.arrayBuffer(),
+        jsonFile.text(),
+      ]);
+
+      const { mergeMasterSheet } = await import("@/lib/master-sheet-merge");
+      const csv = mergeMasterSheet({
+        file1: buf1,
+        file2: buf2,
+        file3: buf3,
+        jsonText: jsonBuf,
+        metadataCsvBuffers:
+          metadataBuffers.length > 0 ? metadataBuffers : undefined,
+      });
+
+      const blob = new Blob([csv], {
+        type: "text/csv;charset=utf-8",
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = "Master_AIxCT-3_Filled.csv";
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      setError("Network error.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Merge failed.");
     } finally {
       setPending(false);
     }

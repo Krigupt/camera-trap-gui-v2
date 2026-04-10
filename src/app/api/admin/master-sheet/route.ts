@@ -4,6 +4,7 @@ import { isAdminUserId } from "@/lib/admin";
 import { mergeMasterSheet } from "@/lib/master-sheet-merge";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   const { userId } = await auth();
