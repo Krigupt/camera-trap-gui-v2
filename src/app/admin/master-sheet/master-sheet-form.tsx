@@ -7,6 +7,21 @@ export function MasterSheetForm() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const getFilenameFromContentDisposition = (value: string | null): string => {
+    if (!value) return "Master_AIxCT-3_Filled.csv";
+    const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match?.[1]) {
+      try {
+        return decodeURIComponent(utf8Match[1]);
+      } catch {
+        return utf8Match[1];
+      }
+    }
+    const simpleMatch = value.match(/filename="?([^"]+)"?/i);
+    if (simpleMatch?.[1]) return simpleMatch[1];
+    return "Master_AIxCT-3_Filled.csv";
+  };
+
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError(null);
@@ -37,38 +52,29 @@ export function MasterSheetForm() {
         return;
       }
 
-      const metaEntries = fd.getAll("metadataCsvs");
-      const metadataBuffers: ArrayBuffer[] = [];
-      for (const entry of metaEntries) {
-        if (entry instanceof File && entry.size > 0) {
-          metadataBuffers.push(await entry.arrayBuffer());
+      // Run merge on server to avoid browser memory/CPU bottlenecks.
+      const response = await fetch("/api/admin/master-sheet", {
+        method: "POST",
+        body: fd,
+      });
+      if (!response.ok) {
+        let message = "Merge failed.";
+        try {
+          const body = (await response.json()) as { error?: string };
+          if (body?.error) message = body.error;
+        } catch {
+          // Keep fallback message when error response isn't JSON.
         }
+        throw new Error(message);
       }
 
-      const [buf1, buf2, buf3, jsonBuf] = await Promise.all([
-        file1.arrayBuffer(),
-        file2.arrayBuffer(),
-        file3.arrayBuffer(),
-        jsonFile.text(),
-      ]);
-
-      const { mergeMasterSheet } = await import("@/lib/master-sheet-merge");
-      const csv = mergeMasterSheet({
-        file1: buf1,
-        file2: buf2,
-        file3: buf3,
-        jsonText: jsonBuf,
-        metadataCsvBuffers:
-          metadataBuffers.length > 0 ? metadataBuffers : undefined,
-      });
-
-      const blob = new Blob([csv], {
-        type: "text/csv;charset=utf-8",
-      });
+      const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "Master_AIxCT-3_Filled.csv";
+      a.download = getFilenameFromContentDisposition(
+        response.headers.get("Content-Disposition")
+      );
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
