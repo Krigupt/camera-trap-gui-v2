@@ -52,31 +52,111 @@ export function MasterSheetForm() {
         return;
       }
 
-      // Run merge on server to avoid browser memory/CPU bottlenecks.
-      const response = await fetch("/api/admin/master-sheet", {
+      const metaEntries = fd.getAll("metadataCsvs");
+      const metadataFiles = metaEntries.filter(
+        (item): item is File => item instanceof File && item.size > 0
+      );
+      const downloadBlob = (blob: Blob, filename: string) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      // Strict GCS-only flow: browser uploads to signed URLs, backend processes from GCS.
+      const uploadSpec = [
+        { field: "file1", file: file1 },
+        { field: "file2", file: file2 },
+        { field: "file3", file: file3 },
+        { field: "jsonFile", file: jsonFile },
+        ...metadataFiles.map((file, idx) => ({
+          field: `metadataCsvs[${idx}]`,
+          file,
+        })),
+      ];
+
+      const signedResponse = await fetch("/api/admin/master-sheet/upload-urls", {
         method: "POST",
-        body: fd,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files: uploadSpec.map((item) => ({
+            field: item.field,
+            name: item.file.name,
+            type: item.file.type || "application/octet-stream",
+          })),
+        }),
       });
-      if (!response.ok) {
-        let message = "Merge failed.";
-        try {
-          const body = (await response.json()) as { error?: string };
-          if (body?.error) message = body.error;
-        } catch {
-          // Keep fallback message when error response isn't JSON.
-        }
-        throw new Error(message);
+      if (!signedResponse.ok) {
+        const text = await signedResponse.text();
+        throw new Error(
+          `Failed to prepare uploads (HTTP ${signedResponse.status}). ${text.slice(
+            0,
+            500
+          )}`
+        );
       }
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = getFilenameFromContentDisposition(
-        response.headers.get("Content-Disposition")
+      const signedBody = (await signedResponse.json()) as {
+        files?: Array<{
+          field: string;
+          uploadUrl: string;
+          objectPath: string;
+          contentType: string;
+        }>;
+      };
+      const signedFiles = signedBody.files ?? [];
+      if (signedFiles.length !== uploadSpec.length) {
+        throw new Error("Upload URL generation mismatch.");
+      }
+
+      const objectPathByField = new Map<string, string>();
+      for (const item of uploadSpec) {
+        const target = signedFiles.find((f) => f.field === item.field);
+        if (!target) throw new Error(`Missing upload URL for ${item.field}.`);
+        const put = await fetch(target.uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": target.contentType },
+          body: item.file,
+        });
+        if (!put.ok) {
+          throw new Error(
+            `Storage upload failed for ${item.file.name} (HTTP ${put.status}). Check bucket CORS and permissions.`
+          );
+        }
+        objectPathByField.set(item.field, target.objectPath);
+      }
+
+      const processResponse = await fetch("/api/admin/master-sheet/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          objectPaths: {
+            file1: objectPathByField.get("file1"),
+            file2: objectPathByField.get("file2"),
+            file3: objectPathByField.get("file3"),
+            jsonFile: objectPathByField.get("jsonFile"),
+            metadataCsvs: metadataFiles.map(
+              (_, idx) => objectPathByField.get(`metadataCsvs[${idx}]`) || ""
+            ),
+          },
+        }),
+      });
+      if (!processResponse.ok) {
+        const bodyText = await processResponse.text();
+        throw new Error(
+          `Backend merge failed (HTTP ${processResponse.status}). ${bodyText.slice(
+            0,
+            500
+          )}`
+        );
+      }
+
+      const blob = await processResponse.blob();
+      const filename = getFilenameFromContentDisposition(
+        processResponse.headers.get("Content-Disposition")
       );
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, filename);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Merge failed.");
     } finally {

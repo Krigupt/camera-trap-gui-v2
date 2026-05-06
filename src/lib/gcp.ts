@@ -45,6 +45,17 @@ const getStorageClient = () => {
 
 const storage = getStorageClient();
 
+function requireMasterSheetUploadBucket(): string {
+  const bucket =
+    process.env.MASTER_SHEET_UPLOAD_BUCKET || process.env.GCP_DEFAULT_BUCKET;
+  if (!bucket) {
+    throw new Error(
+      'MASTER_SHEET_UPLOAD_BUCKET or GCP_DEFAULT_BUCKET is required for master-sheet uploads.'
+    );
+  }
+  return bucket;
+}
+
 export interface BucketInfo {
   name: string;
   location: string;
@@ -127,4 +138,53 @@ export async function checkBucketAccess(bucketName: string): Promise<boolean> {
     console.error('Error checking bucket access:', error);
     return false;
   }
+}
+
+function sanitizeObjectName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+export async function createMasterSheetUploadUrl(params: {
+  objectPath: string;
+  contentType?: string;
+  expiresInSeconds?: number;
+}): Promise<{ bucketName: string; uploadUrl: string; objectPath: string }> {
+  const bucketName = requireMasterSheetUploadBucket();
+  const file = storage.bucket(bucketName).file(params.objectPath);
+  const [uploadUrl] = await file.getSignedUrl({
+    version: "v4",
+    action: "write",
+    expires: Date.now() + (params.expiresInSeconds ?? 900) * 1000,
+    contentType: params.contentType || "application/octet-stream",
+  });
+  return { bucketName, uploadUrl, objectPath: params.objectPath };
+}
+
+export function buildMasterSheetObjectPath(params: {
+  jobId: string;
+  field: string;
+  originalName: string;
+}): string {
+  return `master-sheet-inputs/${params.jobId}/${params.field}/${sanitizeObjectName(
+    params.originalName || "file"
+  )}`;
+}
+
+export async function downloadMasterSheetInput(objectPath: string): Promise<Buffer> {
+  const bucketName = requireMasterSheetUploadBucket();
+  const [buffer] = await storage.bucket(bucketName).file(objectPath).download();
+  return buffer;
+}
+
+export async function deleteMasterSheetInputs(objectPaths: string[]): Promise<void> {
+  const bucketName = requireMasterSheetUploadBucket();
+  await Promise.all(
+    objectPaths.map(async (path) => {
+      try {
+        await storage.bucket(bucketName).file(path).delete({ ignoreNotFound: true });
+      } catch {
+        // Best-effort cleanup
+      }
+    })
+  );
 }
