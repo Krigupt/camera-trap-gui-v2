@@ -136,9 +136,9 @@ export function MasterSheetForm() {
             file2: objectPathByField.get("file2"),
             file3: objectPathByField.get("file3"),
             jsonFile: objectPathByField.get("jsonFile"),
-            metadataCsvs: metadataFiles.map(
-              (_, idx) => objectPathByField.get(`metadataCsvs[${idx}]`) || ""
-            ),
+            metadataCsvs: metadataFiles
+              .map((_, idx) => objectPathByField.get(`metadataCsvs[${idx}]`))
+              .filter((p): p is string => Boolean(p)),
           },
         }),
       });

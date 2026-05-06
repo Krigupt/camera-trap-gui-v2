@@ -27,41 +27,44 @@ type ProcessBody = {
 };
 
 export async function POST(request: NextRequest) {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (!isAdminUserId(userId)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  let body: ProcessBody;
+  let cleanupPaths: string[] = [];
   try {
-    body = (await request.json()) as ProcessBody;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (!isAdminUserId(userId)) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
-  const paths = body.objectPaths;
-  if (!paths?.file1 || !paths.file2 || !paths.file3 || !paths.jsonFile) {
-    return NextResponse.json(
-      {
-        error:
-          "objectPaths.file1, file2, file3, and jsonFile are all required.",
-      },
-      { status: 400 }
-    );
-  }
+    let body: ProcessBody;
+    try {
+      body = (await request.json()) as ProcessBody;
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+    }
 
-  const cleanupPaths = [
-    paths.file1,
-    paths.file2,
-    paths.file3,
-    paths.jsonFile,
-    ...(paths.metadataCsvs ?? []),
-  ];
+    const paths = body.objectPaths;
+    if (!paths?.file1 || !paths.file2 || !paths.file3 || !paths.jsonFile) {
+      return NextResponse.json(
+        {
+          error:
+            "objectPaths.file1, file2, file3, and jsonFile are all required.",
+        },
+        { status: 400 }
+      );
+    }
 
-  try {
+    cleanupPaths = [
+      paths.file1,
+      paths.file2,
+      paths.file3,
+      paths.jsonFile,
+      ...((paths.metadataCsvs ?? []).filter(
+        (p): p is string => typeof p === "string" && p.trim().length > 0
+      )),
+    ];
+
     const [buf1, buf2, buf3, jsonBuf, ...metadataBufs] = await Promise.all([
       downloadMasterSheetInput(paths.file1),
       downloadMasterSheetInput(paths.file2),
@@ -86,9 +89,12 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
+    console.error("Master sheet process failed:", error);
     const message = error instanceof Error ? error.message : "Merge failed.";
-    return NextResponse.json({ error: message }, { status: 422 });
+    return NextResponse.json({ error: message }, { status: 500 });
   } finally {
-    await deleteMasterSheetInputs(cleanupPaths);
+    if (cleanupPaths.length > 0) {
+      await deleteMasterSheetInputs(cleanupPaths);
+    }
   }
 }
