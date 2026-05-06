@@ -10,6 +10,12 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
+function toArrayBuffer(buf: Buffer): ArrayBuffer {
+  const ab = new ArrayBuffer(buf.byteLength);
+  new Uint8Array(ab).set(buf);
+  return ab;
+}
+
 type ProcessBody = {
   objectPaths?: {
     file1?: string;
@@ -65,13 +71,11 @@ export async function POST(request: NextRequest) {
     ]);
 
     const csv = mergeMasterSheet({
-      file1: buf1.buffer.slice(buf1.byteOffset, buf1.byteOffset + buf1.byteLength),
-      file2: buf2.buffer.slice(buf2.byteOffset, buf2.byteOffset + buf2.byteLength),
-      file3: buf3.buffer.slice(buf3.byteOffset, buf3.byteOffset + buf3.byteLength),
+      file1: toArrayBuffer(buf1),
+      file2: toArrayBuffer(buf2),
+      file3: toArrayBuffer(buf3),
       jsonText: jsonBuf.toString("utf-8"),
-      metadataCsvBuffers: metadataBufs.map((b) =>
-        b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
-      ),
+      metadataCsvBuffers: metadataBufs.map((b) => toArrayBuffer(b)),
     });
 
     return new NextResponse(csv, {
