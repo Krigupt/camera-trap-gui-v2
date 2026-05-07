@@ -94,7 +94,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   } finally {
     if (cleanupPaths.length > 0) {
-      await deleteMasterSheetInputs(cleanupPaths);
+      try {
+        await deleteMasterSheetInputs(cleanupPaths);
+      } catch (cleanupError) {
+        // Cleanup must never mask the real merge error.
+        console.error("Master sheet cleanup failed:", cleanupError);
+      }
     }
   }
 }
