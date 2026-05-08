@@ -163,26 +163,6 @@ export function MasterSheetForm() {
       setPending(false);
     }
 
-    const blob = await response.blob();
-
-    const url = window.URL.createObjectURL(blob);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "Master_AIxCT-3_Filled.csv";
-
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    window.URL.revokeObjectURL(url);
-  } catch (err) {
-    setError(err instanceof Error ? err.message : "Merge failed.");
-  } finally {
-    setPending(false);
-  }
-};
-
   const fieldClass =
     "block w-full text-sm text-gray-900 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-indigo-800 hover:file:bg-indigo-100";
 
