@@ -162,6 +162,7 @@ export function MasterSheetForm() {
     } finally {
       setPending(false);
     }
+  };
 
   const fieldClass =
     "block w-full text-sm text-gray-900 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-indigo-800 hover:file:bg-indigo-100";
