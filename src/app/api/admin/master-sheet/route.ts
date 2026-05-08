@@ -4,6 +4,7 @@ import { isAdminUserId } from "@/lib/admin";
 import { mergeMasterSheet } from "@/lib/master-sheet-merge";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
@@ -52,13 +53,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const metadataBuffers: ArrayBuffer[] = [];
-  const metaEntries = formData.getAll("metadataCsvs");
-  for (const entry of metaEntries) {
-    if (entry instanceof File && entry.size > 0) {
-      metadataBuffers.push(await entry.arrayBuffer());
-    }
-  }
+  const metadataBuffers = await Promise.all(
+    formData
+      .getAll("metadataCsvs")
+      .filter(
+        (entry): entry is File =>
+          entry instanceof File && entry.size > 0
+      )
+      .map((file) => file.arrayBuffer())
+  );
 
   try {
     const [buf1, buf2, buf3, jsonBuf] = await Promise.all([

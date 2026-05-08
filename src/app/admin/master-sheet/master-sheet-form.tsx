@@ -8,75 +8,50 @@ export function MasterSheetForm() {
   const [error, setError] = useState<string | null>(null);
 
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setError(null);
-    const form = e.currentTarget;
-    const fd = new FormData(form);
+  e.preventDefault();
+  setError(null);
 
-    setPending(true);
-    try {
-      const file1 = fd.get("file1");
-      const file2 = fd.get("file2");
-      const file3 = fd.get("file3");
-      const jsonFile = fd.get("jsonFile");
+  const form = e.currentTarget;
+  const fd = new FormData(form);
 
-      if (!(file1 instanceof File) || !file1.size) {
-        setError("File #1 (.xlsx) is required.");
-        return;
-      }
-      if (!(file2 instanceof File) || !file2.size) {
-        setError("File #2 (.xlsx) is required.");
-        return;
-      }
-      if (!(file3 instanceof File) || !file3.size) {
-        setError("File #3 (.csv) is required.");
-        return;
-      }
-      if (!(jsonFile instanceof File) || !jsonFile.size) {
-        setError("Predictions JSON is required.");
-        return;
-      }
+  setPending(true);
 
-      const metaEntries = fd.getAll("metadataCsvs");
-      const metadataBuffers: ArrayBuffer[] = [];
-      for (const entry of metaEntries) {
-        if (entry instanceof File && entry.size > 0) {
-          metadataBuffers.push(await entry.arrayBuffer());
-        }
-      }
+  try {
+    const response = await fetch("/api/admin/master-sheet", {
+      method: "POST",
+      body: fd,
+    });
 
-      const [buf1, buf2, buf3, jsonBuf] = await Promise.all([
-        file1.arrayBuffer(),
-        file2.arrayBuffer(),
-        file3.arrayBuffer(),
-        jsonFile.text(),
-      ]);
+    if (!response.ok) {
+      let errorMessage = "Merge failed.";
 
-      const { mergeMasterSheet } = await import("@/lib/master-sheet-merge");
-      const csv = mergeMasterSheet({
-        file1: buf1,
-        file2: buf2,
-        file3: buf3,
-        jsonText: jsonBuf,
-        metadataCsvBuffers:
-          metadataBuffers.length > 0 ? metadataBuffers : undefined,
-      });
+      try {
+        const err = await response.json();
+        errorMessage = err.error || errorMessage;
+      } catch {}
 
-      const blob = new Blob([csv], {
-        type: "text/csv;charset=utf-8",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Master_AIxCT-3_Filled.csv";
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Merge failed.");
-    } finally {
-      setPending(false);
+      throw new Error(errorMessage);
     }
-  };
+
+    const blob = await response.blob();
+
+    const url = window.URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "Master_AIxCT-3_Filled.csv";
+
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    setError(err instanceof Error ? err.message : "Merge failed.");
+  } finally {
+    setPending(false);
+  }
+};
 
   const fieldClass =
     "block w-full text-sm text-gray-900 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-indigo-800 hover:file:bg-indigo-100";
