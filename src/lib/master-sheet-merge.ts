@@ -137,11 +137,12 @@ export function mergeMasterSheet(input: {
   jsonText: string;
   metadataCsvBuffers?: ArrayBuffer[];
 }): string {
-  const wb1 = XLSX.read(input.file1, { type: "array", cellStyles: false });
+  const wb1 = XLSX.read(input.file1, { type: "array", cellStyles: false , dense: true});
   const sh1 = getSpeciesSheet(wb1);
   const rows1 = XLSX.utils.sheet_to_json<Record<string, unknown>>(sh1, {
     defval: "",
     raw: false,
+    blankrows: false
   });
 
   const masterData = new Map<string, MasterEntry>();
@@ -325,51 +326,72 @@ export function mergeMasterSheet(input: {
   }
 
   const cols = [
-    "batchname",
-    "filename",
-    "date",
-    "time",
-    "ai_id",
-    "human_id",
-    "incongruent",
-    "incongruent_reason",
-    "confidence_score",
-    "second_confidence",
-    "final_id",
-  ] as const;
+  "batchname",
+  "filename",
+  "date",
+  "time",
+  "ai_id",
+  "human_id",
+  "incongruent",
+  "incongruent_reason",
+  "confidence_score",
+  "second_confidence",
+  "final_id",
+] as const;
 
-  const lines: string[] = [cols.join(",")];
+let csvOutput = cols.join(",") + "\n";
 
-  for (const [fname, data] of masterData) {
-    const parts = fname.split("_");
-    const batch_name = parts.length >= 3 ? parts[1] : "Unknown";
-    const fname_base = fname.replace(/\.[^.]+$/i, "").toLowerCase();
-    const meta = metadataLookup.get(fname_base) ?? { date: "", time: "" };
-    const h_id = data.human_id;
-    const a_id = data.ai_id;
-    const incongruent =
-      h_id && a_id && h_id.toLowerCase() === a_id.toLowerCase()
-        ? "no"
-        : "yes";
-    const conf = confidenceMap.get(fname) ?? { top: "", second: "" };
-    let final_id_val = finalIdMap.get(fname) ?? "";
-    if (final_id_val.toLowerCase() === "nan") final_id_val = "";
+for (const [fname, data] of masterData) {
+  const parts = fname.split("_");
+  const batch_name = parts.length >= 3 ? parts[1] : "Unknown";
 
-    const row: Record<(typeof cols)[number], string> = {
-      batchname: batch_name,
-      filename: fname,
-      date: meta.date,
-      time: meta.time,
-      ai_id: a_id,
-      human_id: h_id,
-      incongruent,
-      incongruent_reason: data.incongruent_reason,
-      confidence_score: conf.top,
-      second_confidence: conf.second,
-      final_id: final_id_val,
-    };
-    lines.push(cols.map((c) => escapeCsvCell(row[c])).join(","));
+  const fname_base = fname
+    .replace(/\.[^.]+$/i, "")
+    .toLowerCase();
+
+  const meta = metadataLookup.get(fname_base) ?? {
+    date: "",
+    time: "",
+  };
+
+  const h_id = data.human_id;
+  const a_id = data.ai_id;
+
+  const incongruent =
+    h_id &&
+    a_id &&
+    h_id.toLowerCase() === a_id.toLowerCase()
+      ? "no"
+      : "yes";
+
+  const conf = confidenceMap.get(fname) ?? {
+    top: "",
+    second: "",
+  };
+
+  let final_id_val = finalIdMap.get(fname) ?? "";
+
+  if (final_id_val.toLowerCase() === "nan") {
+    final_id_val = "";
   }
 
-  return lines.join("\n") + "\n";
+  const row: Record<(typeof cols)[number], string> = {
+    batchname: batch_name,
+    filename: fname,
+    date: meta.date,
+    time: meta.time,
+    ai_id: a_id,
+    human_id: h_id,
+    incongruent,
+    incongruent_reason: data.incongruent_reason,
+    confidence_score: conf.top,
+    second_confidence: conf.second,
+    final_id: final_id_val,
+  };
+
+  csvOutput +=
+    cols.map((c) => escapeCsvCell(row[c])).join(",") + "\n";
+}
+
+return csvOutput;
 }
