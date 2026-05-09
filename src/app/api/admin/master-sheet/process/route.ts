@@ -10,12 +10,6 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-function toArrayBuffer(buf: Buffer): ArrayBuffer {
-  const ab = new ArrayBuffer(buf.byteLength);
-  new Uint8Array(ab).set(buf);
-  return ab;
-}
-
 type ProcessBody = {
   objectPaths?: {
     file1?: string;
@@ -65,20 +59,20 @@ export async function POST(request: NextRequest) {
       )),
     ];
 
-    const [buf1, buf2, buf3, jsonBuf, ...metadataBufs] = await Promise.all([
-      downloadMasterSheetInput(paths.file1),
-      downloadMasterSheetInput(paths.file2),
-      downloadMasterSheetInput(paths.file3),
-      downloadMasterSheetInput(paths.jsonFile),
-      ...((paths.metadataCsvs ?? []).map((p) => downloadMasterSheetInput(p))),
-    ]);
-
-    const csv = mergeMasterSheet({
-      file1: toArrayBuffer(buf1),
-      file2: toArrayBuffer(buf2),
-      file3: toArrayBuffer(buf3),
-      jsonText: jsonBuf.toString("utf-8"),
-      metadataCsvBuffers: metadataBufs.map((b) => toArrayBuffer(b)),
+    // ==========================================
+    // THE FIX: Sequential Merge Call
+    // Instead of downloading everything with Promise.all, we pass the getter 
+    // functions down so the merge script can download them one at a time.
+    // Also added 'await' since the function is now asynchronous.
+    // ==========================================
+    const csv = await mergeMasterSheet({
+      getFile1: () => downloadMasterSheetInput(paths.file1!),
+      getFile2: () => downloadMasterSheetInput(paths.file2!),
+      getFile3: () => downloadMasterSheetInput(paths.file3!),
+      getJsonFile: () => downloadMasterSheetInput(paths.jsonFile!),
+      getMetadataFiles: (paths.metadataCsvs ?? []).map(
+        (p) => () => downloadMasterSheetInput(p)
+      ),
     });
 
     return new NextResponse(csv, {
