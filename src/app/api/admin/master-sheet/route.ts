@@ -9,26 +9,22 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300; 
 
 // ==========================================
-// 1. Explicitly load Google Credentials from Vercel Env
+// 1. Explicitly load Google Credentials safely
 // ==========================================
+let rawPrivateKey = process.env.GOOGLE_PRIVATE_KEY || "";
+rawPrivateKey = rawPrivateKey.replace(/^"|"$/g, "");
+rawPrivateKey = rawPrivateKey.replace(/\\n/g, "\n");
+
 const storage = new Storage({
   projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
   credentials: {
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    // The .replace() is absolutely critical for Vercel to parse the private key correctly
-    private_key: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+    private_key: rawPrivateKey,
   },
 });
 
 const BUCKET_NAME = process.env.GCP_DEFAULT_BUCKET || "camera-trap-p-e4-2020";
 const bucket = storage.bucket(BUCKET_NAME);
-
-// Helper to convert Node Buffer to ArrayBuffer for your merge function
-function toArrayBuffer(buf: Buffer): ArrayBuffer {
-  const ab = new ArrayBuffer(buf.byteLength);
-  new Uint8Array(ab).set(buf);
-  return ab;
-}
 
 type ProcessBody = {
   objectPaths?: {
@@ -60,7 +56,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required file paths." }, { status: 400 });
     }
 
-    // Keep track of what we need to delete later
     cleanupPaths = [
       paths.file1,
       paths.file2,
@@ -71,32 +66,23 @@ export async function POST(request: NextRequest) {
       )),
     ];
 
-    // Helper to download directly from GCS to a Buffer
+    // Helper: Returns a Buffer directly from GCS. No memory copying.
     const downloadFile = async (path: string): Promise<Buffer> => {
       const [buffer] = await bucket.file(path).download();
       return buffer;
     };
 
     // ==========================================
-    // 2. Download all files from GCS into memory
+    // 2. Process the merge SEQUENTIALLY to save RAM
     // ==========================================
-    const [buf1, buf2, buf3, jsonBuf, ...metadataBufs] = await Promise.all([
-      downloadFile(paths.file1),
-      downloadFile(paths.file2),
-      downloadFile(paths.file3),
-      downloadFile(paths.jsonFile),
-      ...((paths.metadataCsvs ?? []).map((p) => downloadFile(p))),
-    ]);
-
-    // ==========================================
-    // 3. Process the merge
-    // ==========================================
-    const csv = mergeMasterSheet({
-      file1: toArrayBuffer(buf1),
-      file2: toArrayBuffer(buf2),
-      file3: toArrayBuffer(buf3),
-      jsonText: jsonBuf.toString("utf-8"),
-      metadataCsvBuffers: metadataBufs.map((b) => toArrayBuffer(b)),
+    // Instead of downloading everything at once, we pass functions so the 
+    // merge utility can download, process, and delete files one at a time.
+    const csv = await mergeMasterSheet({
+      getFile1: () => downloadFile(paths.file1!),
+      getFile2: () => downloadFile(paths.file2!),
+      getFile3: () => downloadFile(paths.file3!),
+      getJsonFile: () => downloadFile(paths.jsonFile!),
+      getMetadataFiles: (paths.metadataCsvs || []).map((p) => () => downloadFile(p)),
     });
 
     return new NextResponse(csv, {
@@ -114,7 +100,7 @@ export async function POST(request: NextRequest) {
 
   } finally {
     // ==========================================
-    // 4. Cleanup temporary files from GCS bucket
+    // 3. Cleanup temporary files from GCS bucket
     // ==========================================
     if (cleanupPaths.length > 0) {
       try {
