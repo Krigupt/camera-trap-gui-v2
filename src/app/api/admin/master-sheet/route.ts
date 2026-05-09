@@ -2,10 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { isAdminUserId } from "@/lib/admin";
 import { mergeMasterSheet } from "@/lib/master-sheet-merge";
+import { Storage } from "@google-cloud/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+export const maxDuration = 300; // Gives Vercel up to 5 mins for large merges
+
+// Initialize GCS client. It automatically uses your environment credentials.
+const storage = new Storage();
+
+// Replace with your env variable if needed, using your known bucket as a fallback
+const BUCKET_NAME = process.env.GCS_BUCKET_NAME || "camera-trap-p-e4-2020";
+const bucket = storage.bucket(BUCKET_NAME);
 
 export async function POST(request: NextRequest) {
   const { userId } = await auth();
@@ -16,79 +24,74 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let formData: FormData;
+  let body;
   try {
-    formData = await request.formData();
+    // FIX FOR THE 500 ERROR: Parsing JSON instead of FormData
+    body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid form data" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const file1 = formData.get("file1");
-  const file2 = formData.get("file2");
-  const file3 = formData.get("file3");
-  const jsonFile = formData.get("jsonFile");
-
-  if (!(file1 instanceof File) || !file1.size) {
-    return NextResponse.json(
-      { error: "File #1 (.xlsx) is required." },
-      { status: 400 }
-    );
-  }
-  if (!(file2 instanceof File) || !file2.size) {
-    return NextResponse.json(
-      { error: "File #2 (.xlsx) is required." },
-      { status: 400 }
-    );
-  }
-  if (!(file3 instanceof File) || !file3.size) {
-    return NextResponse.json(
-      { error: "File #3 (.csv) is required." },
-      { status: 400 }
-    );
-  }
-  if (!(jsonFile instanceof File) || !jsonFile.size) {
-    return NextResponse.json(
-      { error: "Predictions JSON is required." },
-      { status: 400 }
-    );
+  const { objectPaths } = body;
+  if (!objectPaths) {
+    return NextResponse.json({ error: "Missing objectPaths mapping" }, { status: 400 });
   }
 
-  const metadataBuffers = await Promise.all(
-    formData
-      .getAll("metadataCsvs")
-      .filter(
-        (entry): entry is File =>
-          entry instanceof File && entry.size > 0
-      )
-      .map((file) => file.arrayBuffer())
-  );
+  const { file1, file2, file3, jsonFile, metadataCsvs } = objectPaths;
+
+  if (!file1 || !file2 || !file3 || !jsonFile) {
+    return NextResponse.json(
+      { error: "Missing required file paths." },
+      { status: 400 }
+    );
+  }
 
   try {
-    const [buf1, buf2, buf3, jsonBuf] = await Promise.all([
-      file1.arrayBuffer(),
-      file2.arrayBuffer(),
-      file3.arrayBuffer(),
-      jsonFile.text(),
+    // Helper to download a GCS file and safely convert Node Buffer to standard ArrayBuffer
+    const downloadToArrayBuffer = async (path: string): Promise<ArrayBuffer> => {
+      const [buffer] = await bucket.file(path).download();
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+    };
+
+    // Helper to download a GCS file as text (for JSON)
+    const downloadToText = async (path: string): Promise<string> => {
+      const [buffer] = await bucket.file(path).download();
+      return buffer.toString("utf-8");
+    };
+
+    // Download all files concurrently from your bucket into backend memory
+    const [buf1, buf2, buf3, jsonText] = await Promise.all([
+      downloadToArrayBuffer(file1),
+      downloadToArrayBuffer(file2),
+      downloadToArrayBuffer(file3),
+      downloadToText(jsonFile),
     ]);
 
+    // Download any optional metadata files
+    let metaBufs: ArrayBuffer[] = [];
+    if (Array.isArray(metadataCsvs) && metadataCsvs.length > 0) {
+      metaBufs = await Promise.all(metadataCsvs.map((path: string) => downloadToArrayBuffer(path)));
+    }
+
+    // Process the downloaded buffers using your existing logic
     const csv = mergeMasterSheet({
       file1: buf1,
       file2: buf2,
       file3: buf3,
-      jsonText: jsonBuf,
-      metadataCsvBuffers:
-        metadataBuffers.length > 0 ? metadataBuffers : undefined,
+      jsonText: jsonText,
+      metadataCsvBuffers: metaBufs.length > 0 ? metaBufs : undefined,
     });
 
+    // Send the merged CSV back to the frontend
     return new NextResponse(csv, {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition":
-          'attachment; filename="Master_AIxCT-3_Filled.csv"',
+        "Content-Disposition": 'attachment; filename="Master_AIxCT-3_Filled.csv"',
       },
     });
   } catch (e) {
+    console.error("GCS Download or Merge error:", e);
     const message = e instanceof Error ? e.message : "Merge failed.";
     return NextResponse.json({ error: message }, { status: 422 });
   }
