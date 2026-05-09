@@ -7,6 +7,21 @@ export function MasterSheetForm() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const getFilenameFromContentDisposition = (value: string | null): string => {
+    if (!value) return "Master_AIxCT-3_Filled.csv";
+    const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match?.[1]) {
+      try {
+        return decodeURIComponent(utf8Match[1]);
+      } catch {
+        return utf8Match[1];
+      }
+    }
+    const simpleMatch = value.match(/filename="?([^"]+)"?/i);
+    if (simpleMatch?.[1]) return simpleMatch[1];
+    return "Master_AIxCT-3_Filled.csv";
+  };
+
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError(null);
@@ -38,45 +53,135 @@ export function MasterSheetForm() {
       }
 
       const metaEntries = fd.getAll("metadataCsvs");
-      const metadataBuffers: ArrayBuffer[] = [];
-      for (const entry of metaEntries) {
-        if (entry instanceof File && entry.size > 0) {
-          metadataBuffers.push(await entry.arrayBuffer());
-        }
+      const metadataFiles = metaEntries.filter(
+        (item): item is File => item instanceof File && item.size > 0
+      );
+      const downloadBlob = (blob: Blob, filename: string) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      // Strict GCS-only flow: browser uploads to signed URLs, backend processes from GCS.
+      const uploadSpec = [
+        { field: "file1", file: file1 },
+        { field: "file2", file: file2 },
+        { field: "file3", file: file3 },
+        { field: "jsonFile", file: jsonFile },
+        ...metadataFiles.map((file, idx) => ({
+          field: `metadataCsvs[${idx}]`,
+          file,
+        })),
+      ];
+
+      const signedResponse = await fetch("/api/admin/master-sheet/upload-urls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files: uploadSpec.map((item) => ({
+            field: item.field,
+            name: item.file.name,
+            type: item.file.type || "application/octet-stream",
+          })),
+        }),
+      });
+      if (!signedResponse.ok) {
+        const text = await signedResponse.text();
+        throw new Error(
+          `Failed to prepare uploads (HTTP ${signedResponse.status}). ${text.slice(
+            0,
+            500
+          )}`
+        );
       }
 
-      const [buf1, buf2, buf3, jsonBuf] = await Promise.all([
-        file1.arrayBuffer(),
-        file2.arrayBuffer(),
-        file3.arrayBuffer(),
-        jsonFile.text(),
-      ]);
+      const signedBody = (await signedResponse.json()) as {
+        files?: Array<{
+          field: string;
+          uploadUrl: string;
+          objectPath: string;
+          contentType: string;
+        }>;
+      };
+      const signedFiles = signedBody.files ?? [];
+      if (signedFiles.length !== uploadSpec.length) {
+        throw new Error("Upload URL generation mismatch.");
+      }
 
-      const { mergeMasterSheet } = await import("@/lib/master-sheet-merge");
-      const csv = mergeMasterSheet({
-        file1: buf1,
-        file2: buf2,
-        file3: buf3,
-        jsonText: jsonBuf,
-        metadataCsvBuffers:
-          metadataBuffers.length > 0 ? metadataBuffers : undefined,
-      });
+      const objectPathByField = new Map<string, string>();
+      for (const item of uploadSpec) {
+        const target = signedFiles.find((f) => f.field === item.field);
+        if (!target) throw new Error(`Missing upload URL for ${item.field}.`);
+        const put = await fetch(target.uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": target.contentType },
+          body: item.file,
+        });
+        if (!put.ok) {
+          throw new Error(
+            `Storage upload failed for ${item.file.name} (HTTP ${put.status}). Check bucket CORS and permissions.`
+          );
+        }
+        objectPathByField.set(item.field, target.objectPath);
+      }
 
-      const blob = new Blob([csv], {
-        type: "text/csv;charset=utf-8",
+      const processResponse = await fetch("/api/admin/master-sheet/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          objectPaths: {
+            file1: objectPathByField.get("file1"),
+            file2: objectPathByField.get("file2"),
+            file3: objectPathByField.get("file3"),
+            jsonFile: objectPathByField.get("jsonFile"),
+            metadataCsvs: metadataFiles
+              .map((_, idx) => objectPathByField.get(`metadataCsvs[${idx}]`))
+              .filter((p): p is string => Boolean(p)),
+          },
+        }),
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Master_AIxCT-3_Filled.csv";
-      a.click();
-      URL.revokeObjectURL(url);
+      if (!processResponse.ok) {
+        const bodyText = await processResponse.text();
+        throw new Error(
+          `Backend merge failed (HTTP ${processResponse.status}). ${bodyText.slice(
+            0,
+            500
+          )}`
+        );
+      }
+
+      const blob = await processResponse.blob();
+      const filename = getFilenameFromContentDisposition(
+        processResponse.headers.get("Content-Disposition")
+      );
+      downloadBlob(blob, filename);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Merge failed.");
     } finally {
       setPending(false);
     }
-  };
+
+    const blob = await response.blob();
+
+    const url = window.URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "Master_AIxCT-3_Filled.csv";
+
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    setError(err instanceof Error ? err.message : "Merge failed.");
+  } finally {
+    setPending(false);
+  }
+};
 
   const fieldClass =
     "block w-full text-sm text-gray-900 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-indigo-800 hover:file:bg-indigo-100";

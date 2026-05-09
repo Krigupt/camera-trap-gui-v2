@@ -43,7 +43,22 @@ const getStorageClient = () => {
   }
 };
 
-const storage = getStorageClient();
+let cachedStorage: Storage | null = null;
+function getStorage(): Storage {
+  if (!cachedStorage) cachedStorage = getStorageClient();
+  return cachedStorage;
+}
+
+function requireMasterSheetUploadBucket(): string {
+  const bucket =
+    process.env.MASTER_SHEET_UPLOAD_BUCKET || process.env.GCP_DEFAULT_BUCKET;
+  if (!bucket) {
+    throw new Error(
+      'MASTER_SHEET_UPLOAD_BUCKET or GCP_DEFAULT_BUCKET is required for master-sheet uploads.'
+    );
+  }
+  return bucket;
+}
 
 export interface BucketInfo {
   name: string;
@@ -63,6 +78,7 @@ export interface ImageInfo {
  */
 export async function listBuckets(): Promise<BucketInfo[]> {
   try {
+    const storage = getStorage();
     const [buckets] = await storage.getBuckets();
     return buckets.map(bucket => ({
       name: bucket.name,
@@ -80,6 +96,7 @@ export async function listBuckets(): Promise<BucketInfo[]> {
  */
 export async function listImagesInBucket(bucketName: string, prefix?: string): Promise<ImageInfo[]> {
   try {
+    const storage = getStorage();
     const bucket = storage.bucket(bucketName);
     const [files] = await bucket.getFiles({ prefix });
     
@@ -100,6 +117,7 @@ export async function listImagesInBucket(bucketName: string, prefix?: string): P
  */
 export async function getSignedUrl(bucketName: string, fileName: string, expiresIn: number = 3600): Promise<string> {
   try {
+    const storage = getStorage();
     const bucket = storage.bucket(bucketName);
     const file = bucket.file(fileName);
     
@@ -120,6 +138,7 @@ export async function getSignedUrl(bucketName: string, fileName: string, expires
  */
 export async function checkBucketAccess(bucketName: string): Promise<boolean> {
   try {
+    const storage = getStorage();
     const bucket = storage.bucket(bucketName);
     const [exists] = await bucket.exists();
     return exists;
@@ -127,4 +146,56 @@ export async function checkBucketAccess(bucketName: string): Promise<boolean> {
     console.error('Error checking bucket access:', error);
     return false;
   }
+}
+
+function sanitizeObjectName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+export async function createMasterSheetUploadUrl(params: {
+  objectPath: string;
+  contentType?: string;
+  expiresInSeconds?: number;
+}): Promise<{ bucketName: string; uploadUrl: string; objectPath: string }> {
+  const bucketName = requireMasterSheetUploadBucket();
+  const storage = getStorage();
+  const file = storage.bucket(bucketName).file(params.objectPath);
+  const [uploadUrl] = await file.getSignedUrl({
+    version: "v4",
+    action: "write",
+    expires: Date.now() + (params.expiresInSeconds ?? 900) * 1000,
+    contentType: params.contentType || "application/octet-stream",
+  });
+  return { bucketName, uploadUrl, objectPath: params.objectPath };
+}
+
+export function buildMasterSheetObjectPath(params: {
+  jobId: string;
+  field: string;
+  originalName: string;
+}): string {
+  return `master-sheet-inputs/${params.jobId}/${params.field}/${sanitizeObjectName(
+    params.originalName || "file"
+  )}`;
+}
+
+export async function downloadMasterSheetInput(objectPath: string): Promise<Buffer> {
+  const bucketName = requireMasterSheetUploadBucket();
+  const storage = getStorage();
+  const [buffer] = await storage.bucket(bucketName).file(objectPath).download();
+  return buffer;
+}
+
+export async function deleteMasterSheetInputs(objectPaths: string[]): Promise<void> {
+  const bucketName = requireMasterSheetUploadBucket();
+  const storage = getStorage();
+  await Promise.all(
+    objectPaths.map(async (path) => {
+      try {
+        await storage.bucket(bucketName).file(path).delete({ ignoreNotFound: true });
+      } catch {
+        // Best-effort cleanup
+      }
+    })
+  );
 }

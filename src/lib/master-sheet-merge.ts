@@ -53,6 +53,57 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
+/**
+ * Streaming variant of {@link parseCsv}:
+ * avoids building a huge `rows: string[][]` array in memory.
+ * Calls `onRow` for every non-empty row.
+ */
+function parseCsvStreaming(
+  text: string,
+  onRow: (row: string[]) => void
+): void {
+  let row: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  const t = text.replace(/^\uFEFF/, "");
+
+  const pushRowIfNotEmpty = () => {
+    if (row.some((cell) => String(cell).trim() !== "")) onRow(row);
+    row = [];
+  };
+
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (t[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(cur);
+      cur = "";
+    } else if (c === "\n" || c === "\r") {
+      if (c === "\r" && t[i + 1] === "\n") i++;
+      row.push(cur);
+      cur = "";
+      pushRowIfNotEmpty();
+    } else {
+      cur += c;
+    }
+  }
+
+  row.push(cur);
+  pushRowIfNotEmpty();
+}
+
 function getSpeciesSheet(wb: XLSX.WorkBook): XLSX.WorkSheet {
   const name = wb.SheetNames.includes("Species")
     ? "Species"
@@ -86,11 +137,12 @@ export function mergeMasterSheet(input: {
   jsonText: string;
   metadataCsvBuffers?: ArrayBuffer[];
 }): string {
-  const wb1 = XLSX.read(input.file1, { type: "array", cellStyles: false });
+  const wb1 = XLSX.read(input.file1, { type: "array", cellStyles: false , dense: true});
   const sh1 = getSpeciesSheet(wb1);
   const rows1 = XLSX.utils.sheet_to_json<Record<string, unknown>>(sh1, {
     defval: "",
     raw: false,
+    blankrows: false
   });
 
   const masterData = new Map<string, MasterEntry>();
@@ -154,22 +206,36 @@ export function mergeMasterSheet(input: {
   }
 
   const csvText = new TextDecoder().decode(new Uint8Array(input.file3));
-  const rows3 = parseCsv(csvText);
-  if (rows3.length < 2) {
-    throw new Error("File #3 must be a non-empty CSV with a header row.");
-  }
-  const header3 = rows3[0].map((c) => c.trim().toLowerCase());
-  const fnIx = header3.findIndex((c) => c === "filename");
-  const spIx = header3.findIndex((c) => c === "species");
-  if (fnIx < 0 || spIx < 0) {
-    throw new Error('File #3 must include "filename" and "species" columns.');
-  }
   const finalIdMap = new Map<string, string>();
-  for (let i = 1; i < rows3.length; i++) {
-    const r = rows3[i];
+
+  // Parse file3 CSV without creating a full `rows3` array (huge memory win).
+  let headerSeen = false;
+  let fnIx = -1;
+  let spIx = -1;
+  let dataRows = 0;
+
+  parseCsvStreaming(csvText, (r) => {
+    if (!headerSeen) {
+      headerSeen = true;
+      const header3 = r.map((c) => c.trim().toLowerCase());
+      fnIx = header3.findIndex((c) => c === "filename");
+      spIx = header3.findIndex((c) => c === "species");
+      if (fnIx < 0 || spIx < 0) {
+        throw new Error(
+          'File #3 must include "filename" and "species" columns.'
+        );
+      }
+      return;
+    }
+
     const fn = normStr(r[fnIx]);
     const sp = normStr(r[spIx]);
     if (fn) finalIdMap.set(fn, sp);
+    dataRows++;
+  });
+
+  if (!headerSeen || dataRows < 1) {
+    throw new Error("File #3 must be a non-empty CSV with a header row.");
   }
 
   let predictionsJson: { predictions?: unknown[] };
@@ -215,91 +281,117 @@ export function mergeMasterSheet(input: {
 
   for (const buf of input.metadataCsvBuffers ?? []) {
     const text = new TextDecoder().decode(new Uint8Array(buf));
-    let rows: string[][];
     try {
-      rows = parseCsv(text);
+      let headerParsed = false;
+      let fnameColIdx = -1;
+      let tsColIdx = -1;
+
+      parseCsvStreaming(text, (r) => {
+        if (!headerParsed) {
+          headerParsed = true;
+          const h = r.map((c) => c.trim().toLowerCase());
+          fnameColIdx = h.findIndex(
+            (c) => c.includes("filename") || c.includes("file")
+          );
+          tsColIdx = h.findIndex(
+            (c) =>
+              c.includes("timestamp") || c.includes("date") || c.includes("time")
+          );
+          if (fnameColIdx < 0 || tsColIdx < 0) {
+            // Silently skip metadata file when it doesn't match expected columns.
+            throw new Error("METADATA_HEADER_MISMATCH");
+          }
+          return;
+        }
+
+        const fname = normStr(r[fnameColIdx]);
+        const ts_str = normStr(r[tsColIdx]);
+        if (!ts_str) return;
+        const baseName =
+          fname
+            .replace(/\\/g, "/")
+            .split("/")
+            .pop()
+            ?.replace(/\.[^.]+$/i, "")
+            .toLowerCase() ?? "";
+        if (!baseName) return;
+        const parts = ts_str.split(/\s+/).filter(Boolean);
+        const date_val = parts[0] ?? "";
+        const time_val = parts.slice(1).join(" ");
+        metadataLookup.set(baseName, { date: date_val, time: time_val });
+      });
     } catch {
       continue;
-    }
-    if (rows.length < 2) continue;
-    const h = rows[0].map((c) => c.trim().toLowerCase());
-    const fnameColIdx = h.findIndex(
-      (c) => c.includes("filename") || c.includes("file")
-    );
-    const tsColIdx = h.findIndex(
-      (c) =>
-        c.includes("timestamp") ||
-        c.includes("date") ||
-        c.includes("time")
-    );
-    if (fnameColIdx < 0 || tsColIdx < 0) continue;
-
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i];
-      const fname = normStr(r[fnameColIdx]);
-      const ts_str = normStr(r[tsColIdx]);
-      if (!ts_str) continue;
-      const baseName =
-        fname
-          .replace(/\\/g, "/")
-          .split("/")
-          .pop()
-          ?.replace(/\.[^.]+$/i, "")
-          .toLowerCase() ?? "";
-      if (!baseName) continue;
-      const parts = ts_str.split(/\s+/).filter(Boolean);
-      const date_val = parts[0] ?? "";
-      const time_val = parts.slice(1).join(" ");
-      metadataLookup.set(baseName, { date: date_val, time: time_val });
     }
   }
 
   const cols = [
-    "batchname",
-    "filename",
-    "date",
-    "time",
-    "ai_id",
-    "human_id",
-    "incongruent",
-    "incongruent_reason",
-    "confidence_score",
-    "second_confidence",
-    "final_id",
-  ] as const;
+  "batchname",
+  "filename",
+  "date",
+  "time",
+  "ai_id",
+  "human_id",
+  "incongruent",
+  "incongruent_reason",
+  "confidence_score",
+  "second_confidence",
+  "final_id",
+] as const;
 
-  const lines: string[] = [cols.join(",")];
+let csvOutput = cols.join(",") + "\n";
 
-  for (const [fname, data] of masterData) {
-    const parts = fname.split("_");
-    const batch_name = parts.length >= 3 ? parts[1] : "Unknown";
-    const fname_base = fname.replace(/\.[^.]+$/i, "").toLowerCase();
-    const meta = metadataLookup.get(fname_base) ?? { date: "", time: "" };
-    const h_id = data.human_id;
-    const a_id = data.ai_id;
-    const incongruent =
-      h_id && a_id && h_id.toLowerCase() === a_id.toLowerCase()
-        ? "no"
-        : "yes";
-    const conf = confidenceMap.get(fname) ?? { top: "", second: "" };
-    let final_id_val = finalIdMap.get(fname) ?? "";
-    if (final_id_val.toLowerCase() === "nan") final_id_val = "";
+for (const [fname, data] of masterData) {
+  const parts = fname.split("_");
+  const batch_name = parts.length >= 3 ? parts[1] : "Unknown";
 
-    const row: Record<(typeof cols)[number], string> = {
-      batchname: batch_name,
-      filename: fname,
-      date: meta.date,
-      time: meta.time,
-      ai_id: a_id,
-      human_id: h_id,
-      incongruent,
-      incongruent_reason: data.incongruent_reason,
-      confidence_score: conf.top,
-      second_confidence: conf.second,
-      final_id: final_id_val,
-    };
-    lines.push(cols.map((c) => escapeCsvCell(row[c])).join(","));
+  const fname_base = fname
+    .replace(/\.[^.]+$/i, "")
+    .toLowerCase();
+
+  const meta = metadataLookup.get(fname_base) ?? {
+    date: "",
+    time: "",
+  };
+
+  const h_id = data.human_id;
+  const a_id = data.ai_id;
+
+  const incongruent =
+    h_id &&
+    a_id &&
+    h_id.toLowerCase() === a_id.toLowerCase()
+      ? "no"
+      : "yes";
+
+  const conf = confidenceMap.get(fname) ?? {
+    top: "",
+    second: "",
+  };
+
+  let final_id_val = finalIdMap.get(fname) ?? "";
+
+  if (final_id_val.toLowerCase() === "nan") {
+    final_id_val = "";
   }
 
-  return lines.join("\n") + "\n";
+  const row: Record<(typeof cols)[number], string> = {
+    batchname: batch_name,
+    filename: fname,
+    date: meta.date,
+    time: meta.time,
+    ai_id: a_id,
+    human_id: h_id,
+    incongruent,
+    incongruent_reason: data.incongruent_reason,
+    confidence_score: conf.top,
+    second_confidence: conf.second,
+    final_id: final_id_val,
+  };
+
+  csvOutput +=
+    cols.map((c) => escapeCsvCell(row[c])).join(",") + "\n";
+}
+
+return csvOutput;
 }
