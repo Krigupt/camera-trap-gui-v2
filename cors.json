@@ -1,6 +1,6 @@
 [
   {
-    "origin": ["https://camera-trap-gui-v2.vercel.app"],
+    "origin": ["https://camera-trap-gui-v2.vercel.app", "http://localhost:3011","https://camera-trap-gui-v2-eight.vercel.app"],
     "method": ["GET", "PUT", "HEAD", "OPTIONS"],
     "responseHeader": ["Content-Type", "x-goog-resumable"],
     "maxAgeSeconds": 3600
