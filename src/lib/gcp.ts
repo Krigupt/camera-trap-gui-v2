@@ -119,13 +119,31 @@ export async function getSignedUrl(bucketName: string, fileName: string, expires
   try {
     const storage = getStorage();
     const bucket = storage.bucket(bucketName);
-    const file = bucket.file(fileName);
-    
+    let file = bucket.file(fileName);
+
+    const [existsAtGivenPath] = await file.exists();
+    if (!existsAtGivenPath) {
+      // Some batches were uploaded with every image nested one level under a
+      // single top-level folder (e.g. gs://bucket/P_2019_E5/name.JPG) instead
+      // of the bucket root, while the spreadsheet only recorded the bare
+      // filename. Fall back to checking inside such a folder before failing.
+      const [, , apiResponse] = await bucket.getFiles({ delimiter: '/', autoPaginate: false });
+      const prefixes: string[] = (apiResponse as { prefixes?: string[] })?.prefixes || [];
+      for (const prefix of prefixes) {
+        const candidate = bucket.file(`${prefix}${fileName}`);
+        const [candidateExists] = await candidate.exists();
+        if (candidateExists) {
+          file = candidate;
+          break;
+        }
+      }
+    }
+
     const [signedUrl] = await file.getSignedUrl({
       action: 'read',
       expires: Date.now() + expiresIn * 1000,
     });
-    
+
     return signedUrl;
   } catch (error) {
     console.error('Error generating signed URL:', error);

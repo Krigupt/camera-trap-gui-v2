@@ -15,17 +15,22 @@ export async function POST(request: NextRequest) {
 
     // Get all sheets for this filename (without sort to avoid memory limit issues)
     const allSheets = await ExcelData.find({ filename });
-    
+
     if (allSheets.length === 0) {
       return NextResponse.json({ error: 'No data found for this file' }, { status: 404 });
     }
 
-    // Filter for unique sheet names to avoid duplicates and sort in JavaScript
-    const uniqueSheets = allSheets
-      .filter((sheet, index, self) => 
-        index === self.findIndex(s => s.sheetName === sheet.sheetName)
-      )
-      .sort((a, b) => (a.sheetName || '').localeCompare(b.sheetName || ''));
+    // Re-uploads of the same filename create multiple ExcelData documents that
+    // share a sheetName. Tags are written to all of them (see /api/global-tags),
+    // but a tagged image's row may only exist in one of the duplicates. Group by
+    // sheetName and merge every duplicate's rows so no tagged image is dropped.
+    const docsBySheetName = new Map<string, typeof allSheets>();
+    for (const sheet of allSheets) {
+      const arr = docsBySheetName.get(sheet.sheetName) || [];
+      arr.push(sheet);
+      docsBySheetName.set(sheet.sheetName, arr);
+    }
+    const sheetNames = [...docsBySheetName.keys()].sort((a, b) => a.localeCompare(b));
 
     // Create a new workbook
     const workbook = XLSX.utils.book_new();
@@ -33,7 +38,7 @@ export async function POST(request: NextRequest) {
     // Define tag columns
     const tagColumns = [
       'Blurry',
-      'Low-light', 
+      'Low-light',
       'Body part',
       'Blends in',
       'Unidentifiable to taxonomic level by human ground-truth',
@@ -41,52 +46,55 @@ export async function POST(request: NextRequest) {
       'Similar species that does not occur in the area'
     ];
 
-    // Process each unique sheet
-    for (const sheet of uniqueSheets) {
-      
+    // Process each sheet name, merging rows from every duplicate document
+    for (const sheetName of sheetNames) {
+      const docs = docsBySheetName.get(sheetName)!;
+
       // Group data by human-ai pairs
       const groupedData = new Map();
-      
-      sheet.data.forEach((row: any) => {
-        const key = `${row.human}_vs_${row.ai}`;
-        if (!groupedData.has(key)) {
-          groupedData.set(key, {
-            human: row.human,
-            ai: row.ai,
-            taggedImages: {
-              'Blurry': [],
-              'Low-light': [],
-              'Body part': [], 
-              'Blends in': [],
-              'Unidentifiable to taxonomic level by human ground-truth': [],
-              'Other': [],
-              'Similar species that does not occur in the area': []
-            }
-          });
-        }
-        
-        const group = groupedData.get(key);
-        
-        // Add filenames to appropriate tag columns based on sheet-specific image tags
-        if (row.imagePaths) {
-          row.imagePaths.forEach((imagePath: string) => {
-            // Escape dots in imagePath to match MongoDB storage format
-            const escapedImagePath = imagePath.replace(/\./g, '\uff0e');
-            // Get sheet-specific tags for this image
-            const sheetTags = sheet.sheetSpecificImageTags?.[sheet.sheetName]?.[escapedImagePath];
-            if (sheetTags && sheetTags.length > 0) {
-              sheetTags.forEach((tag: string) => {
-                if (group.taggedImages[tag]) {
-                  // Add this specific image to the tag column (use original imagePath for display)
-                  if (!group.taggedImages[tag].includes(imagePath)) {
-                    group.taggedImages[tag].push(imagePath);
+
+      for (const sheet of docs) {
+        const sheetTagsByImage = sheet.sheetSpecificImageTags?.[sheetName] || {};
+
+        sheet.data.forEach((row: any) => {
+          const key = `${row.human}_vs_${row.ai}`;
+          if (!groupedData.has(key)) {
+            groupedData.set(key, {
+              human: row.human,
+              ai: row.ai,
+              taggedImages: {
+                'Blurry': new Set<string>(),
+                'Low-light': new Set<string>(),
+                'Body part': new Set<string>(),
+                'Blends in': new Set<string>(),
+                'Unidentifiable to taxonomic level by human ground-truth': new Set<string>(),
+                'Other': new Set<string>(),
+                'Similar species that does not occur in the area': new Set<string>()
+              }
+            });
+          }
+
+          const group = groupedData.get(key);
+
+          // Add filenames to appropriate tag columns based on sheet-specific image tags
+          if (row.imagePaths) {
+            row.imagePaths.forEach((imagePath: string) => {
+              // Escape dots in imagePath to match MongoDB storage format
+              const escapedImagePath = imagePath.replace(/\./g, '\uff0e');
+              // Get sheet-specific tags for this image (from its own document)
+              const sheetTags = sheetTagsByImage[escapedImagePath];
+              if (sheetTags && sheetTags.length > 0) {
+                sheetTags.forEach((tag: string) => {
+                  if (group.taggedImages[tag]) {
+                    // Add this specific image to the tag column (use original imagePath for display)
+                    group.taggedImages[tag].add(imagePath);
                   }
-                }
-              });
-            }
-          });
-        }
-      });
+                });
+              }
+            });
+          }
+        });
+      }
 
       // Convert to Excel format
       const worksheetData = [];
@@ -100,7 +108,7 @@ export async function POST(request: NextRequest) {
         const row = [
           group.human,
           group.ai,
-          ...tagColumns.map(tag => group.taggedImages[tag].join(', ')),
+          ...tagColumns.map(tag => Array.from(group.taggedImages[tag]).join(', ')),
           '' // Notable images column (empty for now)
         ];
         worksheetData.push(row);
@@ -125,7 +133,7 @@ export async function POST(request: NextRequest) {
       worksheet['!cols'] = columnWidths;
 
       // Add worksheet to workbook
-      XLSX.utils.book_append_sheet(workbook, worksheet, sheet.sheetName);
+      XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
     }
 
     // Generate Excel buffer
