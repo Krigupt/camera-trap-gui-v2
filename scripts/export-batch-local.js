@@ -182,22 +182,10 @@ function buildSessionTagIndex(sessionDocs) {
 }
 
 async function loadSessionSheets(anchor, ExcelData) {
-  if (anchor.uploadGroupId) {
-    return ExcelData.find({ uploadGroupId: anchor.uploadGroupId }).sort({
-      sheetName: 1,
-    });
-  }
-  const uploadedAt = anchor.uploadedAt;
-  if (uploadedAt) {
-    const windowMs = 5 * 60 * 1000;
-    const start = new Date(uploadedAt.getTime() - windowMs);
-    const end = new Date(uploadedAt.getTime() + windowMs);
-    const nearby = await ExcelData.find({
-      filename: anchor.filename,
-      uploadedAt: { $gte: start, $lte: end },
-    }).sort({ sheetName: 1 });
-    if (nearby.length) return nearby;
-  }
+  // Re-uploads of the same filename create multiple ExcelData documents that
+  // share a sheetName (see /api/export-tags). Pulling only one uploadGroupId
+  // silently drops any tagged/classified row that landed in a different
+  // duplicate, so always merge every document for this filename.
   return ExcelData.find({ filename: anchor.filename }).sort({ sheetName: 1 });
 }
 
@@ -266,37 +254,49 @@ function generateCsv(sessionDocs, speciesByPath, exportScope) {
 
 function generateTaggedExcel(sessionDocs, tagIndex, exportScope) {
   const workbook = XLSX.utils.book_new();
-  const uniqueSheets = sessionDocs
-    .filter(
-      (s, i, self) => i === self.findIndex((x) => x.sheetName === s.sheetName)
-    )
-    .sort((a, b) => (a.sheetName || '').localeCompare(b.sheetName || ''));
+
+  // Re-uploads of the same filename create multiple ExcelData documents that
+  // share a sheetName. A tagged image's row may only exist in one of the
+  // duplicates, so merge every doc for a sheetName rather than picking the
+  // first match (that silently dropped tagged rows — see commit 25eafdf).
+  const docsBySheetName = new Map();
+  for (const doc of sessionDocs) {
+    const arr = docsBySheetName.get(doc.sheetName) || [];
+    arr.push(doc);
+    docsBySheetName.set(doc.sheetName, arr);
+  }
+  const sheetNames = [...docsBySheetName.keys()].sort((a, b) =>
+    (a || '').localeCompare(b || '')
+  );
 
   let totalTaggedImages = 0;
 
-  for (const sheet of uniqueSheets) {
+  for (const sheetName of sheetNames) {
+    const docs = docsBySheetName.get(sheetName);
     const groupedData = new Map();
 
-    for (const row of sheet.data || []) {
-      const key = `${row.human}_vs_${row.ai}`;
-      if (!groupedData.has(key)) {
-        groupedData.set(key, {
-          human: row.human,
-          ai: row.ai,
-          taggedImages: Object.fromEntries(TAG_COLUMNS.map((t) => [t, []])),
-        });
-      }
-      const group = groupedData.get(key);
+    for (const sheet of docs) {
+      for (const row of sheet.data || []) {
+        const key = `${row.human}_vs_${row.ai}`;
+        if (!groupedData.has(key)) {
+          groupedData.set(key, {
+            human: row.human,
+            ai: row.ai,
+            taggedImages: Object.fromEntries(TAG_COLUMNS.map((t) => [t, []])),
+          });
+        }
+        const group = groupedData.get(key);
 
-      for (const imagePath of imagePathsForRow(row)) {
-        const bn = imageBasename(imagePath);
-        if (!exportScope.has(bn)) continue;
-        const tags = tagIndex.get(bn);
-        if (!tags?.length) continue;
-        for (const tag of tags) {
-          if (group.taggedImages[tag] && !group.taggedImages[tag].includes(imagePath)) {
-            group.taggedImages[tag].push(imagePath);
-            totalTaggedImages++;
+        for (const imagePath of imagePathsForRow(row)) {
+          const bn = imageBasename(imagePath);
+          if (!exportScope.has(bn)) continue;
+          const tags = tagIndex.get(bn);
+          if (!tags?.length) continue;
+          for (const tag of tags) {
+            if (group.taggedImages[tag] && !group.taggedImages[tag].includes(imagePath)) {
+              group.taggedImages[tag].push(imagePath);
+              totalTaggedImages++;
+            }
           }
         }
       }
@@ -319,7 +319,7 @@ function generateTaggedExcel(sessionDocs, tagIndex, exportScope) {
       ...TAG_COLUMNS.map(() => ({ wch: 35 })),
       { wch: 35 },
     ];
-    XLSX.utils.book_append_sheet(workbook, ws, sheet.sheetName);
+    XLSX.utils.book_append_sheet(workbook, ws, sheetName);
   }
 
   return { buffer: XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }), totalTaggedImages };
@@ -407,7 +407,10 @@ async function main() {
     process.exit(1);
   }
 
-  await mongoose.connect(process.env.MONGODB_URI);
+  await mongoose.connect(process.env.MONGODB_URI, {
+    serverSelectionTimeoutMS: 20000,
+    socketTimeoutMS: 300000,
+  });
   const ExcelData =
     mongoose.models.ExcelData ||
     mongoose.model(
