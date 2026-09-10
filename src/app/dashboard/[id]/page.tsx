@@ -797,7 +797,10 @@ function DashboardPageInner() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ filename: excelData.filename }),
+          body: JSON.stringify({
+            filename: excelData.filename,
+            bucketName: excelData.bucketName,
+          }),
         });
         
         if (response.ok) {

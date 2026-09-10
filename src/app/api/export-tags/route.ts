@@ -7,14 +7,21 @@ export async function POST(request: NextRequest) {
   try {
     await connectDB();
 
-    const { filename } = await request.json();
-    
+    const { filename, bucketName } = await request.json();
+
     if (!filename) {
       return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
     }
+    if (!bucketName) {
+      return NextResponse.json({ error: 'Bucket name is required' }, { status: 400 });
+    }
 
-    // Get all sheets for this filename (without sort to avoid memory limit issues)
-    const allSheets = await ExcelData.find({ filename });
+    // Different batches (different years/sites) were often uploaded with the
+    // exact same default spreadsheet filename (e.g. "detailed_species_P_E4_report.xlsx"
+    // reused across 2017/2018/2020). Filtering by filename alone merges unrelated
+    // batches together — bucketName reliably identifies the actual batch/year, so
+    // scope by both.
+    const allSheets = await ExcelData.find({ filename, bucketName });
 
     if (allSheets.length === 0) {
       return NextResponse.json({ error: 'No data found for this file' }, { status: 404 });
